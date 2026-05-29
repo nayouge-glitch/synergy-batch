@@ -1,9 +1,10 @@
 # =====================================================================
-# run_synergy.R  (v3)
-# All four models (ZIP, Bliss, HSA, Loewe) for every block, in one run.
-# Baseline correction ON ("all") to match the SynergyFinder web app.
-# Robustly cleans single-agent lines so correction/ZIP fitting never
-# hits an NA in var() (the "missing value where TRUE/FALSE" error).
+# run_synergy.R  (v4)
+# All four models (ZIP, Bliss, HSA, Loewe) for every block, one run.
+# Baseline correction = "part" to match the SynergyFinder web app.
+# NO global jitter (v3's jitter perturbed ZIP scores). Data is passed
+# through unchanged; each block is wrapped in tryCatch so a single
+# failure does not stop the rest.
 # Responses must be % INHIBITION.
 # =====================================================================
 
@@ -19,8 +20,7 @@ input_dir  <- "input"
 output_dir <- "output"
 dir.create(output_dir, showWarnings = FALSE)
 
-# Match the website. The web "Correction ON" corresponds to "all".
-# If your site runs used Correction OFF, set to "non".
+# Set to the SAME option you used on the website.
 CORRECT_BASELINE <- "part"   # "non", "part", or "all"
 
 files <- list.files(input_dir, pattern = "\\.xlsx?$", full.names = TRUE)
@@ -62,12 +62,7 @@ cat("Parsed", bid, "blocks from", length(files), "file(s).\n")
 
 run_one <- function(b) {
   M <- b$mat
-  M[is.na(M)] <- 0
-  # Add tiny deterministic jitter to EVERY value so that no single-agent
-  # row/column (and no fitting subset) can ever have exactly zero variance.
-  set.seed(1)
-  M <- M + matrix(stats::runif(length(M), -1e-4, 1e-4), nrow = nrow(M))
-
+  M[is.na(M)] <- 0          # only fill NA; do NOT jitter real values
   long <- expand.grid(ii = seq_along(b$conc1), jj = seq_along(b$conc2))
   df <- data.frame(
     block_id = 1, drug1 = b$drug1, drug2 = b$drug2,
