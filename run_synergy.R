@@ -1,22 +1,9 @@
 # =====================================================================
-# run_synergy.R
-# Batch synergy scoring with the official SynergyFinder R package.
-# Computes ZIP, Bliss, HSA, Loewe for EVERY block in EVERY input file,
-# in a single run. Output goes to output/.
-#
-# Input: any .xlsx in input/ using the SynergyFinder matrix layout
-#        (the exampleMatrix-style blocks):
-#
-#   Drug1:    | Lapatinib
-#   Drug2:    | Trastuzumab
-#   ConcUnit: | nM
-#            |  0    0.1   1    10   100      <- Drug2 concentrations
-#   0        |  ...                           <- Drug1 conc, then responses
-#   0.1      |  ...
-#   ...
-#   (blank row, then the next block)
-#
-# Responses must be % INHIBITION (100 - viability).
+# run_synergy.R  (v2 - robust)
+# Computes ZIP, Bliss, HSA, Loewe for every block, per block, so one
+# failing block does not stop the rest. Cleans single-agent lines that
+# have zero variance or NA, which break synergyfinder's curve fitting.
+# Responses must be % INHIBITION.
 # =====================================================================
 
 suppressMessages({
@@ -31,12 +18,7 @@ input_dir  <- "input"
 output_dir <- "output"
 dir.create(output_dir, showWarnings = FALSE)
 
-# ---- which baseline correction to match the website -----------------
-# The web app "Correction ON" corresponds to correcting all values using
-# the fitted single-agent baseline. If your site numbers were produced
-# with Correction OFF, set this to "non".
-CORRECT_BASELINE <- "non"   # one of: "non", "part", "all"
-# ---------------------------------------------------------------------
+CORRECT_BASELINE <- "non"   # "non", "part", or "all"
 
 files <- list.files(input_dir, pattern = "\\.xlsx?$", full.names = TRUE)
 if (length(files) == 0) stop("No .xlsx files found in input/")
@@ -44,18 +26,15 @@ if (length(files) == 0) stop("No .xlsx files found in input/")
 parse_blocks <- function(path) {
   raw <- suppressMessages(read_excel(path, sheet = 1, col_names = FALSE))
   m <- as.matrix(as.data.frame(raw, stringsAsFactors = FALSE))
-  nr <- nrow(m)
-  blocks <- list(); i <- 1
+  nr <- nrow(m); blocks <- list(); i <- 1
   while (i <= nr) {
     a <- trimws(as.character(m[i, 1]))
     if (!is.na(a) && a %in% c("Drug1:", "Drug1")) {
       drug1 <- trimws(as.character(m[i, 2]))
       drug2 <- trimws(as.character(m[i + 1, 2]))
       unit  <- trimws(as.character(m[i + 2, 2]))
-      hdr <- suppressWarnings(as.numeric(m[i + 3, -1]))
-      hdr <- hdr[!is.na(hdr)]
-      ncol2 <- length(hdr)
-      r <- i + 4; conc1 <- c(); vals <- list()
+      hdr <- suppressWarnings(as.numeric(m[i + 3, -1])); hdr <- hdr[!is.na(hdr)]
+      ncol2 <- length(hdr); r <- i + 4; conc1 <- c(); vals <- list()
       while (r <= nr) {
         c1 <- suppressWarnings(as.numeric(m[r, 1]))
         if (is.na(c1)) break
@@ -63,67 +42,76 @@ parse_blocks <- function(path) {
         vals[[length(vals) + 1]] <- suppressWarnings(as.numeric(m[r, 2:(1 + ncol2)]))
         r <- r + 1
       }
-      blocks[[length(blocks) + 1]] <- list(
-        drug1 = drug1, drug2 = drug2, unit = unit,
-        conc1 = conc1, conc2 = hdr, mat = do.call(rbind, vals))
+      blocks[[length(blocks) + 1]] <- list(drug1 = drug1, drug2 = drug2,
+        unit = unit, conc1 = conc1, conc2 = hdr, mat = do.call(rbind, vals))
       i <- r
     } else i <- i + 1
   }
   blocks
 }
 
-# ---- build one long-format data frame across all files/blocks -------
-long <- list(); bid <- 0; meta <- list()
-for (f in files) {
-  for (b in parse_blocks(f)) {
-    bid <- bid + 1
-    meta[[bid]] <- data.frame(block_id = bid, source = basename(f),
-                              drug1 = b$drug1, drug2 = b$drug2,
-                              stringsAsFactors = FALSE)
-    for (ii in seq_along(b$conc1)) for (jj in seq_along(b$conc2)) {
-      long[[length(long) + 1]] <- data.frame(
-        block_id = bid, drug1 = b$drug1, drug2 = b$drug2,
-        conc1 = b$conc1[ii], conc2 = b$conc2[jj],
-        response = b$mat[ii, jj],
-        conc_unit1 = b$unit, conc_unit2 = b$unit,
-        stringsAsFactors = FALSE)
-    }
-  }
+# tiny jitter to break exact-zero variance / fill NA on a vector
+declump <- function(v) {
+  v[is.na(v)] <- 0
+  if (stats::var(v) == 0) v[length(v)] <- v[length(v)] + 1e-6
+  v
 }
-df   <- do.call(rbind, long)
-meta <- do.call(rbind, meta)
+
+# collect all blocks with metadata
+all_blocks <- list(); bid <- 0
+for (f in files) for (b in parse_blocks(f)) {
+  bid <- bid + 1
+  b$block_id <- bid; b$source <- basename(f)
+  all_blocks[[bid]] <- b
+}
 cat("Parsed", bid, "blocks from", length(files), "file(s).\n")
 
-# ---- run all four models in one call --------------------------------
-data <- ReshapeData(df, data_type = "inhibition")
-res  <- CalculateSynergy(
-  data,
-  method = c("ZIP", "HSA", "Bliss", "Loewe"),
-  correct_baseline = CORRECT_BASELINE
-)
+run_one <- function(b) {
+  M <- b$mat
+  # clean single-agent row (drug1 = 0) and column (drug2 = 0)
+  r0 <- which(b$conc1 == 0); c0 <- which(b$conc2 == 0)
+  M[is.na(M)] <- 0
+  if (length(r0) == 1) M[r0, ] <- declump(M[r0, ])   # drug2-alone line
+  if (length(c0) == 1) M[, c0] <- declump(M[, c0])   # drug1-alone line
 
-# ---- summary table: mean synergy per model, per block ---------------
-dp <- res$drug_pairs
-syn_cols <- grep("_synergy$", colnames(dp), value = TRUE)
+  long <- expand.grid(ii = seq_along(b$conc1), jj = seq_along(b$conc2))
+  df <- data.frame(
+    block_id = 1,
+    drug1 = b$drug1, drug2 = b$drug2,
+    conc1 = b$conc1[long$ii], conc2 = b$conc2[long$jj],
+    response = M[cbind(long$ii, long$jj)],
+    conc_unit1 = b$unit, conc_unit2 = b$unit,
+    stringsAsFactors = FALSE)
 
-if (length(syn_cols) > 0) {
-  summary_tbl <- dp[, c("block_id", "drug1", "drug2", syn_cols), drop = FALSE]
-} else {
-  # fallback: average per-dose-pair scores over combination cells only
-  ss <- res$synergy_scores
-  model_cols <- grep("_synergy$", colnames(ss), value = TRUE)
-  summary_tbl <- ss %>%
-    filter(conc1 > 0, conc2 > 0) %>%
-    group_by(block_id) %>%
-    summarise(across(all_of(model_cols), ~mean(.x, na.rm = TRUE)),
-              .groups = "drop")
+  data <- ReshapeData(df, data_type = "inhibition")
+  res <- CalculateSynergy(data, method = c("ZIP","HSA","Bliss","Loewe"),
+                          correct_baseline = CORRECT_BASELINE)
+  dp <- res$drug_pairs
+  syn_cols <- grep("_synergy$", colnames(dp), value = TRUE)
+  if (length(syn_cols) > 0) {
+    out <- dp[1, syn_cols, drop = FALSE]
+  } else {
+    ss <- res$synergy_scores
+    mc <- grep("_synergy$", colnames(ss), value = TRUE)
+    out <- as.data.frame(lapply(ss[ss$conc1>0 & ss$conc2>0, mc, drop=FALSE],
+                                mean, na.rm = TRUE))
+  }
+  cbind(data.frame(block_id=b$block_id, source=b$source,
+                   drug1=b$drug1, drug2=b$drug2, stringsAsFactors=FALSE), out)
 }
-summary_tbl <- left_join(meta, summary_tbl, by = "block_id")
 
+rows <- list()
+for (b in all_blocks) {
+  cat("Block", b$block_id, ":", b$drug1, "+", b$drug2, "... ")
+  r <- tryCatch(run_one(b), error = function(e) {
+    cat("FAILED:", conditionMessage(e), "\n"); NULL })
+  if (!is.null(r)) { cat("ok\n"); rows[[length(rows)+1]] <- r }
+}
+
+if (length(rows) == 0) stop("All blocks failed.")
+summary_tbl <- dplyr::bind_rows(rows)
 write.xlsx(summary_tbl, file.path(output_dir, "synergy_summary.xlsx"))
-write.xlsx(res$synergy_scores, file.path(output_dir, "synergy_scores_full.xlsx"))
-saveRDS(res, file.path(output_dir, "synergy_result.rds"))
 
 cat("\n==== SYNERGY SUMMARY (all models) ====\n")
 print(summary_tbl, row.names = FALSE)
-cat("\nWrote: output/synergy_summary.xlsx, synergy_scores_full.xlsx, synergy_result.rds\n")
+cat("\nWrote: output/synergy_summary.xlsx\n")
