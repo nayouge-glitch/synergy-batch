@@ -1,8 +1,9 @@
 # =====================================================================
-# run_synergy.R  (v2 - robust)
-# Computes ZIP, Bliss, HSA, Loewe for every block, per block, so one
-# failing block does not stop the rest. Cleans single-agent lines that
-# have zero variance or NA, which break synergyfinder's curve fitting.
+# run_synergy.R  (v3)
+# All four models (ZIP, Bliss, HSA, Loewe) for every block, in one run.
+# Baseline correction ON ("all") to match the SynergyFinder web app.
+# Robustly cleans single-agent lines so correction/ZIP fitting never
+# hits an NA in var() (the "missing value where TRUE/FALSE" error).
 # Responses must be % INHIBITION.
 # =====================================================================
 
@@ -18,7 +19,9 @@ input_dir  <- "input"
 output_dir <- "output"
 dir.create(output_dir, showWarnings = FALSE)
 
-CORRECT_BASELINE <- "non"   # "non", "part", or "all"
+# Match the website. The web "Correction ON" corresponds to "all".
+# If your site runs used Correction OFF, set to "non".
+CORRECT_BASELINE <- "all"   # "non", "part", or "all"
 
 files <- list.files(input_dir, pattern = "\\.xlsx?$", full.names = TRUE)
 if (length(files) == 0) stop("No .xlsx files found in input/")
@@ -50,38 +53,27 @@ parse_blocks <- function(path) {
   blocks
 }
 
-# tiny jitter to break exact-zero variance / fill NA on a vector
-declump <- function(v) {
-  v[is.na(v)] <- 0
-  if (stats::var(v) == 0) v[length(v)] <- v[length(v)] + 1e-6
-  v
-}
-
-# collect all blocks with metadata
 all_blocks <- list(); bid <- 0
 for (f in files) for (b in parse_blocks(f)) {
-  bid <- bid + 1
-  b$block_id <- bid; b$source <- basename(f)
+  bid <- bid + 1; b$block_id <- bid; b$source <- basename(f)
   all_blocks[[bid]] <- b
 }
 cat("Parsed", bid, "blocks from", length(files), "file(s).\n")
 
 run_one <- function(b) {
   M <- b$mat
-  # clean single-agent row (drug1 = 0) and column (drug2 = 0)
-  r0 <- which(b$conc1 == 0); c0 <- which(b$conc2 == 0)
   M[is.na(M)] <- 0
-  if (length(r0) == 1) M[r0, ] <- declump(M[r0, ])   # drug2-alone line
-  if (length(c0) == 1) M[, c0] <- declump(M[, c0])   # drug1-alone line
+  # Add tiny deterministic jitter to EVERY value so that no single-agent
+  # row/column (and no fitting subset) can ever have exactly zero variance.
+  set.seed(1)
+  M <- M + matrix(stats::runif(length(M), -1e-4, 1e-4), nrow = nrow(M))
 
   long <- expand.grid(ii = seq_along(b$conc1), jj = seq_along(b$conc2))
   df <- data.frame(
-    block_id = 1,
-    drug1 = b$drug1, drug2 = b$drug2,
+    block_id = 1, drug1 = b$drug1, drug2 = b$drug2,
     conc1 = b$conc1[long$ii], conc2 = b$conc2[long$jj],
     response = M[cbind(long$ii, long$jj)],
-    conc_unit1 = b$unit, conc_unit2 = b$unit,
-    stringsAsFactors = FALSE)
+    conc_unit1 = b$unit, conc_unit2 = b$unit, stringsAsFactors = FALSE)
 
   data <- ReshapeData(df, data_type = "inhibition")
   res <- CalculateSynergy(data, method = c("ZIP","HSA","Bliss","Loewe"),
@@ -91,8 +83,7 @@ run_one <- function(b) {
   if (length(syn_cols) > 0) {
     out <- dp[1, syn_cols, drop = FALSE]
   } else {
-    ss <- res$synergy_scores
-    mc <- grep("_synergy$", colnames(ss), value = TRUE)
+    ss <- res$synergy_scores; mc <- grep("_synergy$", colnames(ss), value = TRUE)
     out <- as.data.frame(lapply(ss[ss$conc1>0 & ss$conc2>0, mc, drop=FALSE],
                                 mean, na.rm = TRUE))
   }
@@ -107,11 +98,8 @@ for (b in all_blocks) {
     cat("FAILED:", conditionMessage(e), "\n"); NULL })
   if (!is.null(r)) { cat("ok\n"); rows[[length(rows)+1]] <- r }
 }
-
 if (length(rows) == 0) stop("All blocks failed.")
 summary_tbl <- dplyr::bind_rows(rows)
 write.xlsx(summary_tbl, file.path(output_dir, "synergy_summary.xlsx"))
-
-cat("\n==== SYNERGY SUMMARY (all models) ====\n")
+cat("\n==== SYNERGY SUMMARY (all models, correction =", CORRECT_BASELINE, ") ====\n")
 print(summary_tbl, row.names = FALSE)
-cat("\nWrote: output/synergy_summary.xlsx\n")
