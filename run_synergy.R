@@ -35,7 +35,7 @@ dir.create(output_dir, showWarnings = FALSE)
 # The web app "Correction ON" corresponds to correcting all values using
 # the fitted single-agent baseline. If your site numbers were produced
 # with Correction OFF, set this to "non".
-CORRECT_BASELINE <- "all"   # one of: "non", "part", "all"
+CORRECT_BASELINE <- "non"   # one of: "non", "part", "all"
 # ---------------------------------------------------------------------
 
 files <- list.files(input_dir, pattern = "\\.xlsx?$", full.names = TRUE)
