@@ -1,0 +1,41 @@
+name: SynergyFinder batch
+
+# Run manually (Actions tab -> Run workflow) or automatically when you
+# push new matrices into input/ or change the R script.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'input/**'
+      - 'run_synergy.R'
+      - '.github/workflows/synergy.yml'
+
+jobs:
+  synergy:
+    runs-on: ubuntu-latest
+    # Bioconductor container ships R + build tools, so synergyfinder and
+    # its dependencies (drc, nleqslv, ...) install cleanly.
+    container: bioconductor/bioconductor_docker:RELEASE_3_20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/R/site-library
+          key: bioc-synergyfinder-v1
+
+      - name: Install packages
+        run: |
+          Rscript -e 'if (!requireNamespace("synergyfinder", quietly=TRUE)) BiocManager::install("synergyfinder", update=FALSE, ask=FALSE)'
+          Rscript -e 'pkgs <- c("readxl","openxlsx","dplyr","tidyr"); inst <- pkgs[!pkgs %in% rownames(installed.packages())]; if (length(inst)) install.packages(inst, repos="https://cloud.r-project.org")'
+
+      - name: Run synergy scoring
+        run: Rscript run_synergy.R
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: synergy-results
+          path: output/
