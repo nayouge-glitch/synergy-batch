@@ -21,7 +21,7 @@ dir.create(output_dir, showWarnings = FALSE)
 
 # Match the website. The web "Correction ON" corresponds to "all".
 # If your site runs used Correction OFF, set to "non".
-CORRECT_BASELINE <- "all"   # "non", "part", or "all"
+CORRECT_BASELINE <- "part"   # "non", "part", or "all"
 
 files <- list.files(input_dir, pattern = "\\.xlsx?$", full.names = TRUE)
 if (length(files) == 0) stop("No .xlsx files found in input/")
